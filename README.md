@@ -1,8 +1,7 @@
 # docstring-generator-cli
 
 A pip-installable CLI that scans a Python codebase for functions missing
-docstrings and generates them with a fine-tuned language model, matching the
-style of the codebase's existing documented functions.
+docstrings and generates them with a fine-tuned language model.
 
 Most open-source repos aren't fully undocumented — they have a handful of
 gaps. This tool finds and fills exactly those gaps rather than assuming a repo
@@ -39,8 +38,8 @@ docstring-generator-cli/
 pip install -r requirements.txt
 ```
 
-Training also requires `torch` and `transformers`, since it loads and
-fine-tunes a Hugging Face model.
+Training will also need `transformers` once `train.py` loads a Hugging Face
+model — not yet added since no code imports it.
 
 Everything runs as a module from the repo root, e.g.:
 
