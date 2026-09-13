@@ -20,6 +20,13 @@ TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 
 DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
 
+BATCH_SIZE = 2
+ACCUM_STEPS = 4
+
+MAX_LENGTH = 768
+
+SAVE_EVERY = 500
+
 # Set CHECKPOINT_DIR (e.g. to a mounted Google Drive folder) so checkpoints
 # survive a Colab runtime dying -- the local disk does not.
 CHECKPOINT_DIR = pathlib.Path(os.environ.get("CHECKPOINT_DIR", DATA_DIR.parent))
@@ -89,14 +96,19 @@ def collate(batch, tokenizer):
     texts = [prompt + ex["docstring"] for prompt, ex in zip(prompts, batch)]
 
     encoded = tokenizer(
-        texts, return_tensors="pt", padding=True, truncation=True, max_length=1024
+        texts, return_tensors="pt", padding=True, truncation=True, max_length=MAX_LENGTH
     )
     input_ids = encoded["input_ids"]
     attention_mask = encoded["attention_mask"]
     labels = input_ids.clone()
 
     for i, prompt in enumerate(prompts):
-        n = len(tokenizer(prompt, truncation=True, max_length=1024)["input_ids"])
+        n = len(tokenizer(prompt, truncation=True, max_length=MAX_LENGTH)["input_ids"])
+        # If truncation cut a row at or before the end of its prompt, masking the
+        # whole prompt would leave the row with zero supervised tokens -- and
+        # cross-entropy over zero elements is nan, which the next backward()
+        # writes into every LoRA weight. Always leave one token scored.
+        n = min(n, input_ids.shape[1] - 1)
         labels[i, :n] = -100
     labels[attention_mask == 0] = -100
 
@@ -116,7 +128,32 @@ def save_adapter(model, path: pathlib.Path) -> None:
     print(f"saved adapter weights to {path}")
 
 
-def run_epoch(model, loader, optimizer=None) -> float:
+def assert_adapters_moved(model) -> None:
+    """Fail loudly if one optimizer step left every adapter untouched.
+
+    lora_B starts as zeros, so any non-zero weight in it proves gradients
+    reached the adapters and the optimizer applied them. Checking .grad instead
+    would not work here -- zero_grad() has already set it back to None.
+
+    This catches the quiet failure mode of gradient checkpointing: if no input
+    to a checkpointed block requires grad, the recomputed block has no graph,
+    every LoRA grad is None, and the loss prints happily while nothing trains.
+    """
+    moved = sum(
+        1
+        for name, p in model.named_parameters()
+        if "lora_B" in name and p.count_nonzero() > 0
+    )
+    assert moved > 0, (
+        "no lora_B weight moved off its zero init after an optimizer step -- "
+        "gradients are not reaching the adapters"
+    )
+    print(f"gradient check: {moved} lora_B matrices updated")
+
+
+def run_epoch(
+    model, loader, optimizer=None, checkpoint_path=None, accum_steps=ACCUM_STEPS
+) -> float:
     training = optimizer is not None
     model.train(training)
     total_loss = 0.0
@@ -125,12 +162,27 @@ def run_epoch(model, loader, optimizer=None) -> float:
         with torch.set_grad_enabled(training):
             loss = model(**batch).loss
         if training:
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+            # Accumulated gradients sum, so scale down to keep this equivalent
+            # to one backward over a batch of BATCH_SIZE * accum_steps. Without
+            # the division the effective learning rate is accum_steps times too
+            # high. Report the unscaled loss so the numbers stay comparable.
+            (loss / accum_steps).backward()
+            if (step + 1) % accum_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+                opt_step = (step + 1) // accum_steps
+                if checkpoint_path is not None and opt_step % SAVE_EVERY == 0:
+                    save_adapter(model, checkpoint_path)
         total_loss += loss.item()
         if step % 20 == 0:
             print(f"  step {step}/{len(loader)}: loss {loss.item():.4f}")
+
+    # len(loader) is not divisible by accum_steps, so the last few micro-batches
+    # leave gradients sitting in .grad with no step behind them.
+    if training and len(loader) % accum_steps != 0:
+        optimizer.step()
+        optimizer.zero_grad()
+
     return total_loss / len(loader)
 
 
@@ -147,6 +199,15 @@ def main():
     assert n > 0
     print(trainable_fraction(model))
 
+    # A LoRALinear sits inside all 28 attention blocks, so autograd would
+    # otherwise retain the forward activations of the entire network. Recompute
+    # them in the backward pass instead: ~30% slower, several GB cheaper.
+    model.config.use_cache = False
+    model.gradient_checkpointing_enable(
+        gradient_checkpointing_kwargs={"use_reentrant": False}
+    )
+    model.enable_input_require_grads()
+
     train_data = load_jsonl(DATA_DIR / "train.jsonl")
     val_data = load_jsonl(DATA_DIR / "val.jsonl")
 
@@ -160,20 +221,27 @@ def main():
     if "--sanity" in sys.argv:
         sanity_loader = DataLoader(train_data[:4], batch_size=4, collate_fn=collate_fn)
         for step in range(300):
-            loss = run_epoch(model, sanity_loader, optimizer)
+            # accum_steps=1: this loop is one batch, and stepping every batch
+            # keeps it at the full lr rather than a quarter of it.
+            loss = run_epoch(model, sanity_loader, optimizer, accum_steps=1)
+            if step == 0:
+                assert_adapters_moved(model)
             if step % 50 == 0:
                 print(f"sanity step {step}: loss {loss:.4f}")
         return
 
-    train_loader = DataLoader(train_data, batch_size=8, shuffle=True, collate_fn=collate_fn)
-    val_loader = DataLoader(val_data, batch_size=8, collate_fn=collate_fn)
+    checkpoint_path = CHECKPOINT_DIR / "lora_weights.pt"
+    train_loader = DataLoader(
+        train_data, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn
+    )
+    val_loader = DataLoader(val_data, batch_size=BATCH_SIZE, collate_fn=collate_fn)
 
     epochs = 3
     for epoch in range(epochs):
-        train_loss = run_epoch(model, train_loader, optimizer)
+        train_loss = run_epoch(model, train_loader, optimizer, checkpoint_path)
         val_loss = run_epoch(model, val_loader)
         print(f"epoch {epoch}: train {train_loss:.4f} val {val_loss:.4f}")
-        save_adapter(model, CHECKPOINT_DIR / "lora_weights.pt")
+        save_adapter(model, checkpoint_path)
 
 
 if __name__ == "__main__":
