@@ -107,7 +107,7 @@ def run_epoch(model, loader, optimizer=None) -> float:
     training = optimizer is not None
     model.train(training)
     total_loss = 0.0
-    for batch in loader:
+    for step, batch in enumerate(loader):
         batch = {k: v.to(device) for k, v in batch.items()}
         with torch.set_grad_enabled(training):
             loss = model(**batch).loss
@@ -116,6 +116,8 @@ def run_epoch(model, loader, optimizer=None) -> float:
             optimizer.step()
             optimizer.zero_grad()
         total_loss += loss.item()
+        if step % 20 == 0:
+            print(f"  step {step}/{len(loader)}: loss {loss.item():.4f}")
     return total_loss / len(loader)
 
 
