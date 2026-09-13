@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import sys
 from functools import partial
@@ -18,6 +19,10 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 
 DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
+
+# Set CHECKPOINT_DIR (e.g. to a mounted Google Drive folder) so checkpoints
+# survive a Colab runtime dying -- the local disk does not.
+CHECKPOINT_DIR = pathlib.Path(os.environ.get("CHECKPOINT_DIR", DATA_DIR.parent))
 
 
 def apply_lora(model, r: int = 16, alpha: int = 32) -> int:
@@ -103,6 +108,14 @@ def load_jsonl(path: pathlib.Path) -> list[dict]:
         return [json.loads(line) for line in f]
 
 
+def save_adapter(model, path: pathlib.Path) -> None:
+    lora_state = {
+        k: v for k, v in model.state_dict().items() if "lora_A" in k or "lora_B" in k
+    }
+    torch.save(lora_state, path)
+    print(f"saved adapter weights to {path}")
+
+
 def run_epoch(model, loader, optimizer=None) -> float:
     training = optimizer is not None
     model.train(training)
@@ -160,13 +173,7 @@ def main():
         train_loss = run_epoch(model, train_loader, optimizer)
         val_loss = run_epoch(model, val_loader)
         print(f"epoch {epoch}: train {train_loss:.4f} val {val_loss:.4f}")
-
-    lora_state = {
-        k: v for k, v in model.state_dict().items() if "lora_A" in k or "lora_B" in k
-    }
-    out_path = DATA_DIR.parent / "lora_weights.pt"
-    torch.save(lora_state, out_path)
-    print(f"saved adapter weights to {out_path}")
+        save_adapter(model, CHECKPOINT_DIR / "lora_weights.pt")
 
 
 if __name__ == "__main__":
