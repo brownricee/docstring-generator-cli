@@ -127,7 +127,7 @@ def main():
     tokenizer.padding_side = "right"
 
     model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen2.5-Coder-1.5B", torch_dtype=torch.bfloat16
+        "Qwen/Qwen2.5-Coder-1.5B", dtype=torch.bfloat16
     ).to(device)
 
     n = apply_lora(model)
