@@ -208,6 +208,14 @@ def main():
     )
     model.enable_input_require_grads()
 
+    # Print the memory-relevant settings up front. A stale checkout otherwise
+    # looks exactly like a fresh one until it OOMs several minutes later.
+    print(
+        f"config: batch {BATCH_SIZE} x accum {ACCUM_STEPS} "
+        f"(effective {BATCH_SIZE * ACCUM_STEPS}), max_length {MAX_LENGTH}, "
+        f"grad checkpointing {model.is_gradient_checkpointing}"
+    )
+
     train_data = load_jsonl(DATA_DIR / "train.jsonl")
     val_data = load_jsonl(DATA_DIR / "val.jsonl")
 
