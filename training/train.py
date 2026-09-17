@@ -120,12 +120,41 @@ def load_jsonl(path: pathlib.Path) -> list[dict]:
         return [json.loads(line) for line in f]
 
 
+def lora_state_dict(model) -> dict:
+    return {k: v for k, v in model.state_dict().items() if "lora_A" in k or "lora_B" in k}
+
+
 def save_adapter(model, path: pathlib.Path) -> None:
-    lora_state = {
-        k: v for k, v in model.state_dict().items() if "lora_A" in k or "lora_B" in k
-    }
-    torch.save(lora_state, path)
+    torch.save(lora_state_dict(model), path)
     print(f"saved adapter weights to {path}")
+
+
+def save_train_state(model, optimizer, epoch: int, path: pathlib.Path) -> None:
+    torch.save(
+        {
+            "epoch": epoch,
+            "lora_state": lora_state_dict(model),
+            "optimizer_state": optimizer.state_dict(),
+        },
+        path,
+    )
+    print(f"saved training checkpoint (epoch {epoch}) to {path}")
+
+
+def load_train_state(model, optimizer, path: pathlib.Path) -> int:
+    """Load a checkpoint saved by save_train_state and return the epoch to resume at."""
+    state = torch.load(path, map_location=device)
+    result = model.load_state_dict(state["lora_state"], strict=False)
+    assert not result.unexpected_keys, (
+        f"checkpoint has lora keys the model doesn't: {result.unexpected_keys}"
+    )
+    # optimizer.load_state_dict matches saved state to param_groups by position, not
+    # name -- only correct because apply_lora walks model.modules() deterministically
+    # and the LoRA config is identical between the run that saved this and this one.
+    optimizer.load_state_dict(state["optimizer_state"])
+    epoch = state["epoch"]
+    print(f"resumed from {path}: epoch {epoch} complete, optimizer state restored")
+    return epoch + 1
 
 
 def assert_adapters_moved(model) -> None:
@@ -239,17 +268,26 @@ def main():
         return
 
     checkpoint_path = CHECKPOINT_DIR / "lora_weights.pt"
+    train_state_path = CHECKPOINT_DIR / "train_state.pt"
     train_loader = DataLoader(
         train_data, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn
     )
     val_loader = DataLoader(val_data, batch_size=BATCH_SIZE, collate_fn=collate_fn)
 
+    start_epoch = 0
+    if train_state_path.exists():
+        start_epoch = load_train_state(model, optimizer, train_state_path)
+
     epochs = 3
-    for epoch in range(epochs):
-        train_loss = run_epoch(model, train_loader, optimizer, checkpoint_path)
-        val_loss = run_epoch(model, val_loader)
-        print(f"epoch {epoch}: train {train_loss:.4f} val {val_loss:.4f}")
-        save_adapter(model, checkpoint_path)
+    if start_epoch >= epochs:
+        print(f"train_state.pt already at epoch {start_epoch - 1}; nothing to resume ({epochs=})")
+    else:
+        for epoch in range(start_epoch, epochs):
+            train_loss = run_epoch(model, train_loader, optimizer, checkpoint_path)
+            val_loss = run_epoch(model, val_loader)
+            print(f"epoch {epoch}: train {train_loss:.4f} val {val_loss:.4f}")
+            save_adapter(model, checkpoint_path)
+            save_train_state(model, optimizer, epoch, train_state_path)
 
 
 if __name__ == "__main__":
