@@ -25,7 +25,7 @@ ACCUM_STEPS = 4
 
 MAX_LENGTH = 768
 
-SAVE_EVERY = 500
+SAVE_EVERY = 100
 
 # Set CHECKPOINT_DIR (e.g. to a mounted Google Drive folder) so checkpoints
 # survive a Colab runtime dying -- the local disk does not.
@@ -93,7 +93,14 @@ def collate(batch, tokenizer):
     -100.
     """
     prompts = [build_prompt(ex["code"]) for ex in batch]
-    texts = [prompt + ex["docstring"] for prompt, ex in zip(prompts, batch)]
+    # Append eos so the model is supervised to stop. Padding reuses eos_token, but
+    # pad positions are masked out below, so without this the model never sees a
+    # scored end-of-sequence and generates past the docstring at inference. A row
+    # that hits MAX_LENGTH loses its eos to truncation -- rare enough to accept.
+    texts = [
+        prompt + ex["docstring"] + tokenizer.eos_token
+        for prompt, ex in zip(prompts, batch)
+    ]
 
     encoded = tokenizer(
         texts, return_tensors="pt", padding=True, truncation=True, max_length=MAX_LENGTH
