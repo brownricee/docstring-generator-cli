@@ -26,8 +26,9 @@ docstring-generator-cli/
 │   ├── ast_extractor.py   # AST helpers: strip docstrings, detect params/returns/yields
 │   ├── lora.py            # LoRALinear module (LoRA adapter for an nn.Linear layer)
 │   └── train.py           # Training loop (in progress)
-├── data/                  # Generated train/val/test JSONL (not committed)
-├── requirements.txt
+├── data/                  # Generated train/val/test JSONL (committed, so Colab clones get it)
+├── requirements.txt       # Training deps
+├── requirements-data.txt  # Dataset-building deps (data_pipeline.py only)
 ├── LICENSE
 └── README.md
 ```
@@ -38,8 +39,12 @@ docstring-generator-cli/
 pip install -r requirements.txt
 ```
 
-Training will also need `transformers` once `train.py` loads a Hugging Face
-model — not yet added since no code imports it.
+Rebuilding the dataset additionally needs `datasets`, which is kept in a
+separate file so training runs don't install it for nothing:
+
+```bash
+pip install -r requirements-data.txt
+```
 
 Everything runs as a module from the repo root, e.g.:
 
