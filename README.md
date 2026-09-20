@@ -25,8 +25,11 @@ docstring-generator-cli/
 │   ├── data_pipeline.py   # Filters CodeSearchNet down to clean, Google-style (code, docstring) pairs
 │   ├── ast_extractor.py   # AST helpers: strip docstrings, detect params/returns/yields
 │   ├── lora.py            # LoRALinear module (LoRA adapter for an nn.Linear layer)
-│   └── train.py           # Training loop (in progress)
+│   ├── train.py           # Training loop
+│   ├── load_adapter.py    # Loads the base model + trained LoRA adapter for inference
+│   └── evaluate.py        # Base-vs-fine-tuned comparison on held-out test.jsonl
 ├── data/                  # Generated train/val/test JSONL (committed, so Colab clones get it)
+├── checkpoints/           # Trained LoRA weights (gitignored -- see "Getting the trained weights")
 ├── requirements.txt       # Training deps
 ├── requirements-data.txt  # Dataset-building deps (data_pipeline.py only)
 ├── LICENSE
@@ -68,6 +71,44 @@ filters it down to clean training pairs:
   `{"code": ..., "docstring": ...}` record per line.
 
 Current output sizes: ~24.7k train / ~1k val / ~1.7k test pairs.
+
+## Getting the trained weights
+
+Training runs on Colab and takes several hours, so the LoRA adapter isn't
+committed to git. It's attached to a [GitHub Release](https://github.com/brownricee/docstring-generator-cli/releases) instead:
+
+```bash
+gh release download adapter-v1 --pattern lora_weights.pt --dir checkpoints
+```
+
+(or download `lora_weights.pt` from the Releases page and place it at
+`checkpoints/lora_weights.pt` yourself)
+
+Then verify it loads:
+
+```bash
+python -m training.load_adapter
+```
+
+## Evaluation
+
+`training/evaluate.py` compares the base model against the fine-tuned model on
+a fixed random sample of `data/test.jsonl`, scoring each generated docstring
+with the same conditional-section style filter (`is_google_style`) used to
+build the training data in the first place:
+
+```bash
+python -m training.evaluate          # 30 samples by default
+python -m training.evaluate --n 100  # larger sample, slower on CPU
+```
+
+It also prints the LoRA trainable-parameter fraction and a handful of
+side-by-side (code, reference docstring, base output, fine-tuned output)
+examples for a manual read.
+
+| Run | r | alpha | lr | epochs | trainable % | base pass-rate | fine-tuned pass-rate |
+|---|---|---|---|---|---|---|---|
+| baseline | 16 | 32 | 2e-4 | 3 | 0.282% | *(pending)* | *(pending)* |
 
 ## License
 
