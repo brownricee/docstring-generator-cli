@@ -1,7 +1,7 @@
+import argparse
 import json
 import os
 import pathlib
-import sys
 from functools import partial
 
 import torch
@@ -222,7 +222,21 @@ def run_epoch(
     return total_loss / len(loader)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--r", type=int, default=16, help="LoRA rank")
+    parser.add_argument("--alpha", type=int, default=32, help="LoRA alpha")
+    parser.add_argument("--lr", type=float, default=2e-4, help="optimizer learning rate")
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument(
+        "--sanity", action="store_true", help="overfit a tiny batch instead of training"
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Coder-1.5B")
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
@@ -231,7 +245,7 @@ def main():
         "Qwen/Qwen2.5-Coder-1.5B", dtype=torch.bfloat16
     ).to(device)
 
-    n = apply_lora(model)
+    n = apply_lora(model, r=args.r, alpha=args.alpha)
     assert n > 0
     print(trainable_fraction(model))
 
@@ -258,11 +272,11 @@ def main():
     collate_fn = partial(collate, tokenizer=tokenizer)
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
-        lr=2e-4,
+        lr=args.lr,
         weight_decay=0.01,
     )
 
-    if "--sanity" in sys.argv:
+    if args.sanity:
         sanity_loader = DataLoader(train_data[:4], batch_size=4, collate_fn=collate_fn)
         for step in range(300):
             # accum_steps=1: this loop is one batch, and stepping every batch
@@ -285,7 +299,7 @@ def main():
     if train_state_path.exists():
         start_epoch = load_train_state(model, optimizer, train_state_path)
 
-    epochs = 3
+    epochs = args.epochs
     if start_epoch >= epochs:
         print(f"train_state.pt already at epoch {start_epoch - 1}; nothing to resume ({epochs=})")
     else:
