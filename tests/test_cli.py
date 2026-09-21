@@ -52,9 +52,9 @@ class StubGenerator:
         self.text = text
         self.calls = []
 
-    def generate(self, code):
-        self.calls.append(code)
-        return self.text
+    def generate_batch(self, codes):
+        self.calls.extend(codes)
+        return [self.text] * len(codes)
 
 
 @pytest.fixture

@@ -76,9 +76,9 @@ def fill(
     written = 0
     generated = 0
     for file, source, missing in targets:
-        docstrings = {}
+        prepared = []
         for record in missing:
-            if limit is not None and generated >= limit:
+            if limit is not None and generated + len(prepared) >= limit:
                 break
             where = f"{file}:{record['lineno']} {record['qualname']}"
             try:
@@ -86,9 +86,18 @@ def fill(
             except Unsupported as exc:
                 typer.echo(f"  skip {where}: {exc}")
                 continue
+            prepared.append((record, where, code, fn))
 
-            generated += 1
-            text = gen.postprocess(engine.generate(code))
+        if not prepared:
+            continue
+
+        generated += len(prepared)
+        # One batched call per file instead of one per function.
+        raw_outputs = engine.generate_batch([code for _, _, code, _ in prepared])
+
+        docstrings = {}
+        for (record, where, _, fn), raw in zip(prepared, raw_outputs):
+            text = gen.postprocess(raw)
             if not gen.is_usable(text, fn):
                 typer.echo(f"  skip {where}: generated docstring failed validation")
                 continue

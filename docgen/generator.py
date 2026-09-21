@@ -100,24 +100,34 @@ def is_usable(text: str, fn: FuncDef) -> bool:
 
 
 class Generator:
-    """Wraps a loaded model and tokenizer to produce one docstring at a time."""
+    """Wraps a loaded model and tokenizer to produce docstrings in a batch."""
 
     def __init__(self, model, tokenizer):
         self.model = model
         self.tokenizer = tokenizer
+        # Left padding is required for batched generation on a decoder-only
+        # model: generation continues from the right edge of each row, so
+        # right-padding would insert padding tokens between prompt and
+        # continuation instead of before the prompt.
+        self.tokenizer.padding_side = "left"
 
-    def generate(self, code: str) -> str:
-        """Generate a raw docstring continuation for one function.
+    def generate_batch(self, codes: list[str]) -> list[str]:
+        """Generate raw docstring continuations for a batch of functions.
+
+        One model.generate() call for the whole batch, instead of one per
+        function -- the sequential version left the CPU/GPU underused between
+        calls.
 
         Args:
-            code: The function's source, dedented to column 0.
+            codes: Each function's source, dedented to column 0.
 
         Returns:
-            str: The decoded continuation, or "" if generation ran past its
-            token budget without stopping.
+            list[str]: One decoded continuation per input, in the same order.
+            An entry is "" if that generation ran past its token budget
+            without stopping.
         """
-        prompt = build_prompt(code)
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+        prompts = [build_prompt(code) for code in codes]
+        inputs = self.tokenizer(prompts, return_tensors="pt", padding=True).to(self.model.device)
         with torch.no_grad():
             out = self.model.generate(
                 **inputs,
@@ -127,14 +137,23 @@ class Generator:
             )
 
         input_len = inputs["input_ids"].shape[1]
-        # skip_special_tokens erases EOS from the text, so "did it stop on its
-        # own?" has to be asked of the token count. A run-on generation is a
-        # half-written docstring; refuse it rather than insert a truncated one.
-        if out.shape[1] - input_len >= MAX_NEW_TOKENS:
-            logger.warning("generation hit the %d-token cap", MAX_NEW_TOKENS)
-            return ""
+        eos_id = self.tokenizer.eos_token_id
 
-        return self.tokenizer.decode(out[0][input_len:], skip_special_tokens=True)
+        results = []
+        for row in out[:, input_len:]:
+            # pad_token_id == eos_token_id (set in model.py), so a finished
+            # row's trailing padding is also eos -- the first eos in a row is
+            # always its real stop, and skip_special_tokens strips all of it.
+            # A row with no eos anywhere never stopped on its own: it ran the
+            # full budget and is a half-written docstring: refuse it rather
+            # than insert a truncated one.
+            if not bool((row == eos_id).any()):
+                logger.warning("generation hit the %d-token cap", MAX_NEW_TOKENS)
+                results.append("")
+                continue
+            results.append(self.tokenizer.decode(row, skip_special_tokens=True))
+
+        return results
 
 
 def load_generator(adapter: pathlib.Path | None = None) -> Generator:
