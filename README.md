@@ -161,7 +161,7 @@ examples for a manual read.
 
 | Run | r | alpha | lr | epochs | trainable % | base pass-rate | fine-tuned pass-rate |
 |---|---|---|---|---|---|---|---|
-| baseline | 16 | 32 | 2e-4 | 3 | 0.282% | 4/30 (13.3%) | 30/30 (100.0%) |
+| baseline | 16 | 32 | 2e-4 | 3 | 0.282% | 23/100 (23.0%) | 99/100 (99.0%) |
 
 ## License
 
