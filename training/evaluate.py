@@ -5,9 +5,10 @@ import random
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from training.data_pipeline import is_google_style
+from docgen.astutils import is_google_style
+from docgen.prompt import build_prompt
 from training.load_adapter import load_finetuned_model
-from training.train import DATA_DIR, build_prompt, load_jsonl, trainable_fraction
+from training.train import DATA_DIR, load_jsonl, trainable_fraction
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 

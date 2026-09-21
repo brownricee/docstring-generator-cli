@@ -8,15 +8,13 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from training.lora import LoRALinear
+# Both live in docgen/ so the installable CLI does not have to ship this
+# package. The prompt in particular must be the one definition -- training and
+# inference have to agree character for character.
+from docgen.model import apply_lora
+from docgen.prompt import build_prompt
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-
-# Every one of Qwen's layers contains these four nn.Linear modules -- they are
-# the attention part of the layer. Wrapping only these, and leaving the much
-# bigger feed-forward layers beside them alone, is what keeps the trainable
-# count near 0.1-1% of the model.
-TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
 
 DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
 
@@ -32,28 +30,6 @@ SAVE_EVERY = 100
 CHECKPOINT_DIR = pathlib.Path(os.environ.get("CHECKPOINT_DIR", DATA_DIR.parent))
 
 
-def apply_lora(model, r: int = 16, alpha: int = 32) -> int:
-    """Replace every targeted nn.Linear with a LoRALinear wrapping it.
-
-    Returns how many were replaced. Check it is not zero: wrapping nothing
-    trains nothing, and that looks exactly like a bad learning rate.
-    """
-    to_replace = []
-    for parent in model.modules():
-        for child_name, child in parent.named_children():
-            if child_name in TARGET_MODULES:
-                to_replace.append((parent, child_name, child))
-
-    for parent, child_name, child in to_replace:
-        setattr(parent, child_name, LoRALinear(child, r, alpha))
-
-    for name, param in model.named_parameters():
-        if "lora_A" not in name and "lora_B" not in name:
-            param.requires_grad = False
-
-    return len(to_replace)
-
-
 def trainable_fraction(model) -> tuple[int, int]:
     """Return (trainable, total) parameter counts.
 
@@ -64,20 +40,6 @@ def trainable_fraction(model) -> tuple[int, int]:
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
     return trainable, total
-
-
-def build_prompt(code: str) -> str:
-    """Turn docstring-stripped code into the exact text fed to the model.
-
-    Week 5's CLI has to build its prompt the same way, character for
-    character. If the two differ, the model meets a format at inference that
-    it never saw in training. Define it once here and import it there.
-    """
-    return (
-        "Write a Google-style docstring for the following Python function. "
-        "Respond with only the docstring text -- no code, no quotes.\n\n"
-        f"{code}\n\nDocstring:\n"
-    )
 
 
 def collate(batch, tokenizer):

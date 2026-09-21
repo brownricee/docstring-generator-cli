@@ -1,5 +1,6 @@
 import ast
 import logging
+import re
 from pathlib import Path
 
 # Silent unless the caller configures a handler, so a 412k-example pipeline run
@@ -53,7 +54,7 @@ def strip_docstring(source: str) -> str | None:
 
     tree = None
     try:
-        tree = ast.parse(source) 
+        tree = ast.parse(source)
     except SyntaxError:
         logger.debug("unparseable source (probably Python 2)")
         return None
@@ -174,10 +175,69 @@ def is_generator(func: FuncDef) -> bool:
     )
 
 
+# --- Google-style section checks ---------------------------------------------
+
+# `\r` is in the TRAILING class only. Under re.M, `$` matches just before a
+# `\n`, so in a CRLF docstring the `\r` sits between "Args:" and that position
+# and has to be consumable -- without it, "Args:\r\n" reads as not-a-header and
+# ~408 real training pairs get silently dropped. The leading class needs no
+# `\r`, since in CRLF the `\r` ends the previous line rather than starting this
+# one.
+#
+# "Raises" is in the table but is NOT part of is_google_style -- adding it
+# there would change the corpus filter. It exists for the CLI's inference-time
+# check; see sections_match's note about one-directional claims.
+_SECTIONS = {n: re.compile(rf"^[ \t]*{n}:[ \t\r]*$", re.M)
+             for n in ("Args", "Returns", "Yields", "Raises")}
+
+
+def has_section(docstring: str, section_name: str) -> bool:
+    # True if docstring contains a Google section header on a line of its own.
+    return _SECTIONS[section_name].search(docstring) is not None
+
+
+def raises_exception(func: FuncDef) -> bool:
+    """True if func contains a raise statement in its own scope."""
+    return any(isinstance(node, ast.Raise) for node in _iter_own_nodes(func))
+
+
+def sections_match(docstring: str, fn: FuncDef) -> bool:
+    """True if Args/Returns/Yields is present exactly when the signature calls for it.
+
+    Equality in both directions: a missing section is undocumented, and a
+    section the signature does not support is wrong documentation.
+
+    This is the check the CLI gates generated docstrings on. It deliberately
+    does NOT require a section to be present at all -- see is_google_style --
+    and it says nothing about Raises, which is one-directional and belongs to
+    the CLI alone (see docgen.generator.is_usable).
+    """
+    return (
+        has_section(docstring, "Args") == has_params(fn)
+        and has_section(docstring, "Returns") == returns_value(fn)
+        and has_section(docstring, "Yields") == is_generator(fn)
+    )
+
+
+def is_google_style(docstring: str, fn: FuncDef) -> bool:
+    """The training-data filter: sections_match, plus at least one section.
+
+    The extra clause is a corpus-purity requirement -- it keeps the training
+    set teaching sections at all, rather than filling up with bare one-line
+    summaries. A real no-parameter, void, non-generator function can never
+    satisfy it, which is why inference gates on sections_match alone.
+
+    Keep this defined in terms of sections_match so the two cannot drift.
+    """
+    return sections_match(docstring, fn) and any(
+        has_section(docstring, n) for n in ("Args", "Returns", "Yields")
+    )
+
+
 # --- scanner half (the Week-5 CLI's core, useful now for eval targets) ---
 
 def scan_source(source: str, path: str) -> list[dict]:
-    """Return one record per function found: name, qualified name, lineno,
+    """Return one record per function found: name, qualified name, line span,
     and whether it already has a docstring.
 
     Use ast.NodeVisitor here (not ast.walk) so you can track the enclosing
@@ -199,7 +259,11 @@ def scan_source(source: str, path: str) -> list[dict]:
                 {
                     "name": node.name,
                     "qualname": ".".join(self.scope + [node.name]),
+                    # lineno is the `def` line, NOT the first decorator -- so
+                    # slicing [lineno-1:end_lineno] yields the function without
+                    # its decorators, matching CodeSearchNet's func_code_string.
                     "lineno": node.lineno,
+                    "end_lineno": node.end_lineno,
                     "has_docstring": ast.get_docstring(node) is not None,
                     "path": path,
                 }

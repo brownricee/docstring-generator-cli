@@ -1,9 +1,9 @@
 import pathlib
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from training.train import apply_lora, build_prompt
+from docgen.model import load_model
+from docgen.prompt import build_prompt
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -11,25 +11,14 @@ CHECKPOINT_PATH = pathlib.Path(__file__).resolve().parent.parent / "checkpoints"
 
 
 def load_finetuned_model(checkpoint_path: pathlib.Path = CHECKPOINT_PATH):
-    """Load the base model wrapped with LoRA and restore trained adapter weights."""
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Coder-1.5B")
-    tokenizer.pad_token = tokenizer.eos_token
+    """Load the base model wrapped with LoRA and restore trained adapter weights.
 
-    model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen2.5-Coder-1.5B", torch_dtype=torch.bfloat16
-    ).to(device)
-    apply_lora(model)
-
-    state_dict = torch.load(checkpoint_path, map_location=device)
-    result = model.load_state_dict(state_dict, strict=False)
-    # missing_keys is every frozen base-model weight, which never appears in an
-    # adapter-only checkpoint -- only unexpected_keys indicates an actual mismatch.
-    assert not result.unexpected_keys, (
-        f"checkpoint has keys the model doesn't: {result.unexpected_keys}"
-    )
-
-    model.eval()
-    return model, tokenizer
+    The loading itself lives in docgen/model.py, which the CLI also uses. This
+    keeps the repo-checkout default path (checkpoints/, where the README says
+    to download the release asset) for the training-side scripts, which do not
+    want the CLI's user-level cache.
+    """
+    return load_model(checkpoint_path)
 
 
 def main():

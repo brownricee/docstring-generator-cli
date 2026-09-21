@@ -3,44 +3,15 @@ import inspect
 import json
 import pathlib
 import collections
-import re
 from datasets import load_dataset
 
-# Package-qualified so this resolves from the repo root rather than only from
-# inside training
-from training.ast_extractor import (
-    FuncDef,
-    has_params,
-    is_generator,
-    returns_value,
-    strip_docstring,
-)
-
-# `\r` is in the TRAILING class only. Under re.M, `$` matches just before a
-# `\n`, so in a CRLF docstring the `\r` sits between "Args:" and that position
-# and has to be consumable -- without it, "Args:\r\n" reads as not-a-header and
-# ~408 real training pairs get silently dropped. The leading class needs no
-# `\r`, since in CRLF the `\r` ends the previous line rather than starting this
-# one.
-_SECTIONS = {n: re.compile(rf"^[ \t]*{n}:[ \t\r]*$", re.M)
-             for n in ("Args", "Returns", "Yields")}
+# The ast and Google-section primitives live in docgen/ so the installable CLI
+# can reuse them without shipping this package (and its `datasets` dependency).
+from docgen.astutils import FuncDef, is_google_style, strip_docstring
 
 def load_raw():
     ds = load_dataset("code_search_net", "python")
     return ds
-
-def is_google_style(docstring: str, fn: FuncDef) -> bool:
-    args_ok = has_section(docstring, "Args") == has_params(fn)
-    returns_ok = has_section(docstring, "Returns") == returns_value(fn)
-    yields_ok = has_section(docstring, "Yields") == is_generator(fn)
-
-    return args_ok and returns_ok and yields_ok and any(has_section(docstring, n) for n in ("Args", "Returns", "Yields"))
-
-def has_section(docstring: str, section_name: str) -> bool:
-    # True if docstring contains a Google section header on a line of its own.
-    return _SECTIONS[section_name].search(docstring) is not None
-
-
 
 def is_reasonable_length(docstring: str, code: str) -> bool:
     doc_lines = docstring.strip().count("\n") + 1
