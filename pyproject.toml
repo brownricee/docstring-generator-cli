@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "docstring-generator-cli"
+version = "0.1.0"
+description = "Find Python functions missing docstrings and fill them with a fine-tuned LoRA model."
+readme = "README.md"
+license = { file = "LICENSE" }
+# ast.FunctionDef | ast.AsyncFunctionDef in docgen/astutils.py is a runtime
+# PEP-604 union evaluated at import, so 3.9 raises TypeError on import.
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.12",
+    "libcst>=1.1",
+    "torch>=2.0",
+    "transformers>=4.40",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+docgen = "docgen.cli:app"
+
+# An explicit allowlist, not auto-discovery: training/, data/ (23 MB of
+# committed JSONL) and checkpoints/ must never reach the wheel.
+[tool.hatch.build.targets.wheel]
+packages = ["docgen"]
+
+# hatchling's default sdist is "everything git doesn't ignore", which would
+# ship data/*.jsonl. Name the contents instead.
+[tool.hatch.build.targets.sdist]
+include = ["docgen", "pyproject.toml", "README.md", "LICENSE"]

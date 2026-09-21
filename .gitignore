@@ -1,2 +1,5 @@
 __pycache__/
 checkpoints/
+dist/
+*.egg-info/
+.pytest_cache/
