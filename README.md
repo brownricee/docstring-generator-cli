@@ -21,22 +21,75 @@ needs docs from scratch.
 
 ```
 docstring-generator-cli/
-├── training/
-│   ├── data_pipeline.py   # Filters CodeSearchNet down to clean, Google-style (code, docstring) pairs
-│   ├── ast_extractor.py   # AST helpers: strip docstrings, detect params/returns/yields
+├── docgen/                # The installable package (this is what ships)
+│   ├── cli.py             # `docgen scan` / `docgen fill`
+│   ├── scanner.py         # Finds undocumented functions, prepares prompt input
+│   ├── generator.py       # Runs the model, cleans and validates its output
+│   ├── inserter.py        # libcst insertion -- preserves the rest of the file exactly
+│   ├── model.py           # Base model + LoRA + adapter loading, adapter caching
 │   ├── lora.py            # LoRALinear module (LoRA adapter for an nn.Linear layer)
+│   ├── prompt.py          # build_prompt -- the single definition, shared with training
+│   └── astutils.py        # AST helpers + Google-style section checks
+├── training/              # Not shipped; imports from docgen
+│   ├── data_pipeline.py   # Filters CodeSearchNet down to clean, Google-style (code, docstring) pairs
 │   ├── train.py           # Training loop
 │   ├── load_adapter.py    # Loads the base model + trained LoRA adapter for inference
 │   └── evaluate.py        # Base-vs-fine-tuned comparison on held-out test.jsonl
 ├── data/                  # Generated train/val/test JSONL (committed, so Colab clones get it)
 ├── checkpoints/           # Trained LoRA weights (gitignored -- see "Getting the trained weights")
+├── tests/                 # Run with `pytest` -- no model required
+├── examples/sample.py     # A small partially-documented module to try the CLI on
+├── pyproject.toml         # Packaging; `pip install -e .` provides the `docgen` command
 ├── requirements.txt       # Training deps
 ├── requirements-data.txt  # Dataset-building deps (data_pipeline.py only)
 ├── LICENSE
 └── README.md
 ```
 
-## Setup
+`docgen/` owns everything both halves need — the prompt above all, which must
+be identical at training and inference time. Training imports from `docgen`,
+never the reverse, so the published package carries no training code.
+
+## Using the CLI
+
+```bash
+pip install -e .
+```
+
+`scan` reports the gaps and loads no model, so it returns instantly:
+
+```bash
+docgen scan examples/
+```
+```
+examples/sample.py:22  word_count
+examples/sample.py:32  Accumulator.__init__
+examples/sample.py:35  Accumulator.add
+
+3 of 4 functions missing docstrings
+```
+
+`fill` generates a docstring for each gap and prints a diff. Nothing is
+modified until you pass `--write`:
+
+```bash
+docgen fill examples/sample.py                 # dry run: prints a unified diff
+docgen fill examples/sample.py --write         # applies in place
+docgen fill ./somerepo --limit 5               # stop after 5 generations
+docgen fill ./somerepo --adapter path/to/lora_weights.pt
+```
+
+The adapter is downloaded to `~/.cache/docgen/` on first use. The base model
+(~3 GB) comes from HuggingFace the same way. A generated docstring is only
+inserted if its sections match the function's actual signature; anything else
+is reported as a skip and the file is left alone.
+
+**First-run cost, honestly:** this week's backend is `transformers` + PyTorch,
+so `pip install` pulls ~2.5 GB and CPU-only generation takes on the order of a
+minute per function. Week 6 replaces this with a quantized GGUF model run
+through `llama-cpp-python`, which is the fix for both.
+
+## Setup for training
 
 ```bash
 pip install -r requirements.txt
