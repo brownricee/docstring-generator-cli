@@ -1,3 +1,4 @@
+import logging
 import os
 import pathlib
 import shutil
@@ -7,6 +8,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from docgen.lora import LoRALinear
+
+logger = logging.getLogger(__name__)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -47,6 +50,25 @@ def apply_lora(model, r: int = 16, alpha: int = 32) -> int:
             param.requires_grad = False
 
     return len(to_replace)
+
+
+def fuse_lora(model) -> int:
+    """Replace every LoRALinear with its fused nn.Linear equivalent.
+
+    Returns how many were fused. Call only after the adapter's weights are
+    loaded and finalized -- fusing before that bakes in the untrained init
+    instead of the trained correction.
+    """
+    to_fuse = []
+    for parent in model.modules():
+        for child_name, child in parent.named_children():
+            if isinstance(child, LoRALinear):
+                to_fuse.append((parent, child_name, child))
+
+    for parent, child_name, child in to_fuse:
+        setattr(parent, child_name, child.fuse())
+
+    return len(to_fuse)
 
 
 def resolve_adapter(override: pathlib.Path | None = None) -> pathlib.Path:
@@ -96,7 +118,19 @@ def load_model(adapter_path: pathlib.Path):
     # 4.56; on 4.51 it is swallowed into config kwargs and the requested dtype
     # is silently ignored. torch_dtype= is understood by every version in our
     # supported range.
-    model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype=dtype).to(device)
+    #
+    # attn_implementation="sdpa" asks for PyTorch's fused scaled_dot_product_attention
+    # kernel instead of transformers' eager attention loop. Verified after load,
+    # not just requested: an unsupported kwarg has silently no-op'd before (see
+    # the torch_dtype note above), and scaled_dot_product_attention itself has
+    # existed unconditionally since torch 2.0, so a hard crash here is unlikely --
+    # the real risk is a silent fallback, which only checking model.config catches.
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID, torch_dtype=dtype, attn_implementation="sdpa"
+    ).to(device)
+    actual_attn = getattr(model.config, "_attn_implementation", None)
+    if actual_attn != "sdpa":
+        logger.warning("requested sdpa attention but got %r", actual_attn)
     apply_lora(model)
 
     state_dict = torch.load(adapter_path, map_location=device)
@@ -106,6 +140,11 @@ def load_model(adapter_path: pathlib.Path):
     assert not result.unexpected_keys, (
         f"checkpoint has keys the model doesn't: {result.unexpected_keys}"
     )
+
+    # Fuse now, not before load_state_dict: fusing must see the trained
+    # lora_A/lora_B values, not their kaiming/zero init.
+    fused = fuse_lora(model)
+    assert fused > 0, "fused nothing -- LoRA wrapping must have failed silently"
 
     model.eval()
     return model, tokenizer

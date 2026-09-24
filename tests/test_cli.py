@@ -51,9 +51,11 @@ class StubGenerator:
     def __init__(self, text=GOOD):
         self.text = text
         self.calls = []
+        self.batches = []
 
     def generate_batch(self, codes):
         self.calls.extend(codes)
+        self.batches.append(list(codes))
         return [self.text] * len(codes)
 
 
@@ -176,3 +178,40 @@ def test_nothing_to_do_on_a_fully_documented_file(tmp_path, stub):
     result = runner.invoke(app, ["fill", str(path)])
     assert "nothing to do" in result.output
     assert stub.calls == []
+
+
+def test_batches_span_multiple_files_up_to_max_batch_size(tmp_path, monkeypatch, stub):
+    from docgen import cli
+
+    monkeypatch.setattr(cli, "MAX_BATCH_SIZE", 4)
+
+    for name in ("a", "b", "c"):
+        write_source(
+            tmp_path / f"{name}.py",
+            f"def {name}_one(x):\n    return x\n\n\ndef {name}_two(x):\n    return x\n",
+        )
+
+    result = runner.invoke(app, ["fill", str(tmp_path), "--write"])
+    assert result.exit_code == 0
+
+    # 3 files x 2 gaps = 6 items, MAX_BATCH_SIZE=4 -> flush after 2 files (4
+    # items, never splitting a file), then a final flush for the last file.
+    assert [len(b) for b in stub.batches] == [4, 2]
+    assert "wrote 6 docstring(s)" in result.output
+
+
+def test_one_file_with_more_gaps_than_max_batch_size_is_not_split(tmp_path, monkeypatch, stub):
+    from docgen import cli
+
+    monkeypatch.setattr(cli, "MAX_BATCH_SIZE", 2)
+
+    source = "".join(f"def f{i}(x):\n    return x\n\n\n" for i in range(5))
+    write_source(tmp_path / "big.py", source)
+
+    result = runner.invoke(app, ["fill", str(tmp_path), "--write"])
+    assert result.exit_code == 0
+
+    # MAX_BATCH_SIZE is a trigger, not a hard cap: one file's items are never
+    # split across two flushes, so all 5 go out in a single batch.
+    assert stub.batches == [stub.calls]
+    assert "wrote 5 docstring(s)" in result.output

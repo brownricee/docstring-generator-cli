@@ -37,6 +37,17 @@ class LoRALinear(nn.Module):
 
         return base_out + self.scale * self.lora_B(self.lora_A(x))
 
+    def fuse(self) -> nn.Linear:
+        """Collapse this wrapper into a single equivalent nn.Linear.
+
+        Valid only because inference never updates lora_A/lora_B after this:
+        the fused weight is a snapshot, not a live view.
+        """
+        with torch.no_grad():
+            delta = self.scale * (self.lora_B.weight @ self.lora_A.weight)
+            self.linear.weight += delta.to(self.linear.weight.dtype)
+        return self.linear
+
 def main():
     # Smoke test only: construct a wrapper and confirm it builds. Loss and
     # optimizer moved to train.py -- they belong to the training run, not to

@@ -1,5 +1,6 @@
 import ast
 import difflib
+import itertools
 import pathlib
 from typing import Optional
 
@@ -20,6 +21,11 @@ app = typer.Typer(
 )
 
 PathArg = typer.Argument(..., exists=True, help="File or directory to process.")
+
+# A whole file's prepared items are always added to a pending batch together
+# (see fill()), so this is a trigger, not a hard cap: one file with more gaps
+# than this produces a single larger batch for that file alone.
+MAX_BATCH_SIZE = 16
 
 
 @app.command()
@@ -75,6 +81,64 @@ def fill(
 
     written = 0
     generated = 0
+    # (file, source, record, where, code, fn) -- a whole file's prepared items
+    # are always added together and flushed together (see flush() below), so
+    # that a file's docstrings are always inserted in one call against its one
+    # captured `source`. Splitting a file across two flushes would insert
+    # against the same pristine `source` twice, and the second write would
+    # silently erase the first.
+    pending = []
+
+    def flush():
+        nonlocal written
+        if not pending:
+            return
+        raw_outputs = engine.generate_batch([item[4] for item in pending])
+
+        for file, group in itertools.groupby(
+            zip(pending, raw_outputs), key=lambda pair: pair[0][0]
+        ):
+            group = list(group)
+            source = group[0][0][1]
+
+            docstrings = {}
+            for (_, _, record, where, _, fn), raw in group:
+                text = gen.postprocess(raw)
+                if not gen.is_usable(text, fn):
+                    typer.echo(f"  skip {where}: generated docstring failed validation")
+                    continue
+                docstrings[record["lineno"]] = text
+
+            if not docstrings:
+                continue
+
+            new_source, inserted = insert_docstrings(source, docstrings)
+            if not inserted:
+                continue
+
+            # The one check that catches any quoting bug the inserter did not
+            # anticipate. Never hand back a file that stopped being valid Python.
+            try:
+                ast.parse(new_source)
+            except SyntaxError as exc:
+                typer.echo(f"  skip {file}: insertion produced invalid Python ({exc})")
+                continue
+
+            if write:
+                write_source(file, new_source)
+                written += len(inserted)
+                typer.echo(f"  wrote {len(inserted)} docstring(s) to {file}")
+            else:
+                diff = difflib.unified_diff(
+                    source.splitlines(keepends=True),
+                    new_source.splitlines(keepends=True),
+                    fromfile=str(file),
+                    tofile=str(file),
+                )
+                typer.echo("".join(diff))
+
+        pending.clear()
+
     for file, source, missing in targets:
         prepared = []
         for record in missing:
@@ -86,50 +150,18 @@ def fill(
             except Unsupported as exc:
                 typer.echo(f"  skip {where}: {exc}")
                 continue
-            prepared.append((record, where, code, fn))
+            prepared.append((file, source, record, where, code, fn))
 
         if not prepared:
             continue
 
         generated += len(prepared)
-        # One batched call per file instead of one per function.
-        raw_outputs = engine.generate_batch([code for _, _, code, _ in prepared])
+        pending.extend(prepared)
 
-        docstrings = {}
-        for (record, where, _, fn), raw in zip(prepared, raw_outputs):
-            text = gen.postprocess(raw)
-            if not gen.is_usable(text, fn):
-                typer.echo(f"  skip {where}: generated docstring failed validation")
-                continue
-            docstrings[record["lineno"]] = text
+        if len(pending) >= MAX_BATCH_SIZE:
+            flush()
 
-        if not docstrings:
-            continue
-
-        new_source, inserted = insert_docstrings(source, docstrings)
-        if not inserted:
-            continue
-
-        # The one check that catches any quoting bug the inserter did not
-        # anticipate. Never hand back a file that stopped being valid Python.
-        try:
-            ast.parse(new_source)
-        except SyntaxError as exc:
-            typer.echo(f"  skip {file}: insertion produced invalid Python ({exc})")
-            continue
-
-        if write:
-            write_source(file, new_source)
-            written += len(inserted)
-            typer.echo(f"  wrote {len(inserted)} docstring(s) to {file}")
-        else:
-            diff = difflib.unified_diff(
-                source.splitlines(keepends=True),
-                new_source.splitlines(keepends=True),
-                fromfile=str(file),
-                tofile=str(file),
-            )
-            typer.echo("".join(diff))
+    flush()
 
     if write:
         typer.echo(f"\nwrote {written} docstring(s)")

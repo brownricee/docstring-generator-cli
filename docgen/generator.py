@@ -99,6 +99,23 @@ def is_usable(text: str, fn: FuncDef) -> bool:
     return sections_match(text, fn)
 
 
+def _argsort_by_length(lengths: list[int]) -> list[int]:
+    """Return indices that sort lengths ascending.
+
+    order[i] is the original index of the i-th shortest item -- the same
+    convention argsort uses.
+    """
+    return sorted(range(len(lengths)), key=lambda i: lengths[i])
+
+
+def _unsort(sorted_items: list, order: list[int]) -> list:
+    """Undo _argsort_by_length: place each sorted item back at its original index."""
+    items = [None] * len(order)
+    for pos, orig_idx in enumerate(order):
+        items[orig_idx] = sorted_items[pos]
+    return items
+
+
 class Generator:
     """Wraps a loaded model and tokenizer to produce docstrings in a batch."""
 
@@ -127,8 +144,16 @@ class Generator:
             without stopping.
         """
         prompts = [build_prompt(code) for code in codes]
-        inputs = self.tokenizer(prompts, return_tensors="pt", padding=True).to(self.model.device)
-        with torch.no_grad():
+
+        # Tokenize once, unpadded, to get exact per-item lengths, then sort so
+        # the batch pads to a much smaller max length than a random ordering
+        # would. Unsorted back to input order below -- callers never see this.
+        encoded = self.tokenizer(prompts, padding=False)
+        order = _argsort_by_length([len(ids) for ids in encoded["input_ids"]])
+        sorted_encoded = {k: [v[i] for i in order] for k, v in encoded.items()}
+
+        inputs = self.tokenizer.pad(sorted_encoded, return_tensors="pt").to(self.model.device)
+        with torch.inference_mode():
             out = self.model.generate(
                 **inputs,
                 max_new_tokens=MAX_NEW_TOKENS,
@@ -139,7 +164,7 @@ class Generator:
         input_len = inputs["input_ids"].shape[1]
         eos_id = self.tokenizer.eos_token_id
 
-        results = []
+        results_sorted = []
         for row in out[:, input_len:]:
             # pad_token_id == eos_token_id (set in model.py), so a finished
             # row's trailing padding is also eos -- the first eos in a row is
@@ -149,11 +174,11 @@ class Generator:
             # than insert a truncated one.
             if not bool((row == eos_id).any()):
                 logger.warning("generation hit the %d-token cap", MAX_NEW_TOKENS)
-                results.append("")
+                results_sorted.append("")
                 continue
-            results.append(self.tokenizer.decode(row, skip_special_tokens=True))
+            results_sorted.append(self.tokenizer.decode(row, skip_special_tokens=True))
 
-        return results
+        return _unsort(results_sorted, order)
 
 
 def load_generator(adapter: pathlib.Path | None = None) -> Generator:
