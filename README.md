@@ -85,9 +85,22 @@ inserted if its sections match the function's actual signature; anything else
 is reported as a skip and the file is left alone.
 
 **First-run cost, honestly:** this week's backend is `transformers` + PyTorch,
-so `pip install` pulls ~2.5 GB and CPU-only generation takes on the order of a
-minute per function. Week 6 replaces this with a quantized GGUF model run
-through `llama-cpp-python`, which is the fix for both.
+so `pip install` pulls ~580 MB (torch + transformers) and the base model is
+another ~3 GB from HuggingFace on first run. Generation is now batched across
+the whole `fill` run rather than per file — on a CPU-only machine, collapsing
+8 tiny one-function files into a single batched call cut generation time from
+73s to 21s (~3.4x). Week 6 still replaces the backend with a quantized GGUF
+model run through `llama-cpp-python`, which is the fix for the ~580 MB
+install and the remaining per-token cost batching alone can't solve.
+
+| Change | Before | After | Speedup |
+|---|---|---|---|
+| Batch across the whole run vs. one call per file (8 one-function files) | 73.3s | 21.5s | 3.4x |
+| Fuse LoRA into base weights vs. leaving it wrapped | 18.6s | 18.4s | ~1.5% |
+| `sdpa` attention vs. eager attention | byte-identical output | byte-identical output | confirms no regression |
+
+Informal, single-machine (CPU-only) measurements from one script, not a
+rigorous benchmark suite.
 
 ## Setup for training
 
