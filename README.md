@@ -26,7 +26,7 @@ docstring-generator-cli/
 │   ├── scanner.py         # Finds undocumented functions, prepares prompt input
 │   ├── generator.py       # Runs the model, cleans and validates its output
 │   ├── inserter.py        # libcst insertion -- preserves the rest of the file exactly
-│   ├── model.py           # Base model + LoRA + adapter loading, adapter caching
+│   ├── model.py           # Base model + LoRA + adapter loading (training/export only)
 │   ├── lora.py            # LoRALinear module (LoRA adapter for an nn.Linear layer)
 │   ├── prompt.py          # build_prompt -- the single definition, shared with training
 │   └── astutils.py        # AST helpers + Google-style section checks
@@ -34,7 +34,8 @@ docstring-generator-cli/
 │   ├── data_pipeline.py   # Filters CodeSearchNet down to clean, Google-style (code, docstring) pairs
 │   ├── train.py           # Training loop
 │   ├── load_adapter.py    # Loads the base model + trained LoRA adapter for inference
-│   └── evaluate.py        # Base-vs-fine-tuned comparison on held-out test.jsonl
+│   ├── export_gguf.py     # Fuses the adapter into the base model for GGUF conversion
+│   └── evaluate.py        # Base-vs-fine-tuned (or torch-vs-GGUF) comparison on held-out test.jsonl
 ├── data/                  # Generated train/val/test JSONL (committed, so Colab clones get it)
 ├── checkpoints/           # Trained LoRA weights (gitignored -- see "Getting the trained weights")
 ├── tests/                 # Run with `pytest` -- no model required
@@ -53,8 +54,11 @@ never the reverse, so the published package carries no training code.
 ## Using the CLI
 
 ```bash
-pip install -e .
+pip install -e . --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 ```
+
+The extra index serves prebuilt `llama-cpp-python` wheels. PyPI only has its
+source distribution, which needs CMake and a C++ compiler to install.
 
 `scan` reports the gaps and loads no model, so it returns instantly:
 
@@ -76,31 +80,37 @@ modified until you pass `--write`:
 docgen fill examples/sample.py                 # dry run: prints a unified diff
 docgen fill examples/sample.py --write         # applies in place
 docgen fill ./somerepo --limit 5               # stop after 5 generations
-docgen fill ./somerepo --adapter path/to/lora_weights.pt
+docgen fill ./somerepo --model path/to/docgen.gguf
 ```
 
-The adapter is downloaded to `~/.cache/docgen/` on first use. The base model
-(~3 GB) comes from HuggingFace the same way. A generated docstring is only
+The model is a single GGUF file: the LoRA adapter fused into the base model,
+then quantized. It's downloaded to `~/.cache/docgen/` on first use. A generated docstring is only
 inserted if its sections match the function's actual signature; anything else
 is reported as a skip and the file is left alone.
 
-**First-run cost, honestly:** this week's backend is `transformers` + PyTorch,
-so `pip install` pulls ~580 MB (torch + transformers) and the base model is
-another ~3 GB from HuggingFace on first run. Generation is now batched across
-the whole `fill` run rather than per file — on a CPU-only machine, collapsing
-8 tiny one-function files into a single batched call cut generation time from
-73s to 21s (~3.4x). Week 6 still replaces the backend with a quantized GGUF
-model run through `llama-cpp-python`, which is the fix for the ~580 MB
-install and the remaining per-token cost batching alone can't solve.
+**First-run cost:** inference runs through `llama-cpp-python` on a Q8_0 GGUF
+model, so the CLI does not depend on PyTorch or transformers at all.
+
+| | Before (torch + transformers) | After (llama-cpp-python + GGUF) |
+|---|---|---|
+| Installed Python deps | 593 MB (CPU torch alone: 479 MB) | 11 MB `llama_cpp` (126 MB whole venv) |
+| Model download | ~3.1 GB base model + 8.4 MB adapter | 1.65 GB single file |
+| RAM while generating | ~6 GB (fp32 on CPU) | ~1.7 GB |
+| `docgen fill examples/sample.py` wall time | 47s | 9s |
+
+On `examples/sample.py`, the Q8_0 model's diff is byte-identical to the torch
+model's. The 100-sample quantization comparison is still pending (see
+Evaluation). The table is informal, single-machine CPU measurements, not a
+benchmark suite. On Linux, a default `pip install torch` pulls the CUDA
+build, which is several GB more than the CPU numbers above.
+
+Earlier speedups on the torch backend, kept for the record:
 
 | Change | Before | After | Speedup |
 |---|---|---|---|
 | Batch across the whole run vs. one call per file (8 one-function files) | 73.3s | 21.5s | 3.4x |
 | Fuse LoRA into base weights vs. leaving it wrapped | 18.6s | 18.4s | ~1.5% |
 | `sdpa` attention vs. eager attention | byte-identical output | byte-identical output | confirms no regression |
-
-Informal, single-machine (CPU-only) measurements from one script, not a
-rigorous benchmark suite.
 
 ## Setup for training
 
@@ -175,6 +185,39 @@ examples for a manual read.
 | Run | r | alpha | lr | epochs | trainable % | base pass-rate | fine-tuned pass-rate |
 |---|---|---|---|---|---|---|---|
 | baseline | 16 | 32 | 2e-4 | 3 | 0.282% | 23/100 (23.0%) | 99/100 (99.0%) |
+
+### Quantized model vs. the torch model
+
+`--gguf` swaps the base-vs-fine-tuned comparison for torch-fine-tuned vs.
+GGUF exports on the same samples. It reports each export's pass-rate and how
+many of its outputs are identical, after cleanup, to the torch model's:
+
+```bash
+python -m training.evaluate --n 100 --gguf checkpoints/docgen-f16.gguf --gguf checkpoints/docgen-q8_0.gguf
+```
+
+Needs `llama-cpp-python`, which `requirements.txt` leaves out so Colab
+training runs don't compile it. The torch reference pass is the slow part on
+CPU, and a GPU speeds it up. The GGUF passes run on CPU either way.
+
+*Results pending.* On `examples/sample.py`, Q8_0 output is byte-identical to
+torch.
+
+## Exporting the GGUF model
+
+```bash
+python -m training.export_gguf    # fuses the adapter -> checkpoints/merged/
+git clone https://github.com/ggml-org/llama.cpp
+pip install sentencepiece
+# use the clone's bundled gguf-py; an older pip-installed `gguf` breaks the converter
+PYTHONPATH=llama.cpp/gguf-py python llama.cpp/convert_hf_to_gguf.py checkpoints/merged \
+    --outtype f16 --outfile checkpoints/docgen-f16.gguf
+# llama-quantize comes in the prebuilt binaries on llama.cpp's Releases page
+llama-quantize checkpoints/docgen-f16.gguf checkpoints/docgen-q8_0.gguf Q8_0
+```
+
+Sizes: F16 3.09 GB, Q8_0 1.65 GB, Q6_K 1.27 GB, Q5_K_M 1.13 GB, Q4_K_M 0.99 GB.
+The CLI downloads `docgen-q8_0.gguf` from the `gguf-v1` GitHub Release.
 
 ## License
 
