@@ -104,14 +104,6 @@ Evaluation). The table is informal, single-machine CPU measurements, not a
 benchmark suite. On Linux, a default `pip install torch` pulls the CUDA
 build, which is several GB more than the CPU numbers above.
 
-Earlier speedups on the torch backend, kept for the record:
-
-| Change | Before | After | Speedup |
-|---|---|---|---|
-| Batch across the whole run vs. one call per file (8 one-function files) | 73.3s | 21.5s | 3.4x |
-| Fuse LoRA into base weights vs. leaving it wrapped | 18.6s | 18.4s | ~1.5% |
-| `sdpa` attention vs. eager attention | byte-identical output | byte-identical output | confirms no regression |
-
 ## Setup for training
 
 ```bash
