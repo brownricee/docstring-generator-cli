@@ -1,8 +1,5 @@
 import logging
-import os
 import pathlib
-import shutil
-import urllib.request
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -20,14 +17,6 @@ MODEL_ID = "Qwen/Qwen2.5-Coder-1.5B"
 # bigger feed-forward layers beside them alone, is what keeps the trainable
 # count near 0.1-1% of the model.
 TARGET_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj")
-
-ADAPTER_URL = (
-    "https://github.com/brownricee/docstring-generator-cli/releases/download/"
-    "adapter-v1/lora_weights.pt"
-)
-CACHE_DIR = pathlib.Path(
-    os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")
-) / "docgen"
 
 
 def apply_lora(model, r: int = 16, alpha: int = 32) -> int:
@@ -69,32 +58,6 @@ def fuse_lora(model) -> int:
         setattr(parent, child_name, child.fuse())
 
     return len(to_fuse)
-
-
-def resolve_adapter(override: pathlib.Path | None = None) -> pathlib.Path:
-    """Return a local path to the adapter, downloading it on first use.
-
-    An installed CLI has no repo checkout, so the checkpoints/ directory the
-    training scripts use does not exist. Cache the release asset instead.
-    """
-    if override is not None:
-        return override
-
-    dest = CACHE_DIR / "lora_weights.pt"
-    if dest.exists():
-        return dest
-
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"downloading adapter (8.4 MB) -> {dest}")
-
-    # Download to .part and rename. os.replace is atomic, so a Ctrl-C partway
-    # through leaves no half-written file that later runs would trust as cached.
-    tmp = dest.with_suffix(".part")
-    with urllib.request.urlopen(ADAPTER_URL) as response, open(tmp, "wb") as f:
-        shutil.copyfileobj(response, f)
-    os.replace(tmp, dest)
-
-    return dest
 
 
 def load_model(adapter_path: pathlib.Path):

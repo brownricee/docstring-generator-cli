@@ -65,7 +65,7 @@ def stub(monkeypatch):
     from docgen import generator
 
     engine = StubGenerator()
-    monkeypatch.setattr(generator, "load_generator", lambda adapter=None: engine)
+    monkeypatch.setattr(generator, "load_generator", lambda model_path=None: engine)
     return engine
 
 
@@ -162,7 +162,7 @@ def test_unusable_generation_is_skipped_not_inserted(module, monkeypatch):
 
     # word_count takes an arg and returns a value; a bare summary fails the gate.
     engine = StubGenerator("Just a summary with no sections.")
-    monkeypatch.setattr(generator, "load_generator", lambda adapter=None: engine)
+    monkeypatch.setattr(generator, "load_generator", lambda model_path=None: engine)
 
     before = module.read_bytes()
     result = runner.invoke(app, ["fill", str(module), "--write"])

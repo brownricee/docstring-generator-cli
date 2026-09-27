@@ -53,8 +53,8 @@ def fill(
     limit: Optional[int] = typer.Option(
         None, "--limit", help="Stop after generating this many docstrings."
     ),
-    adapter: Optional[pathlib.Path] = typer.Option(
-        None, "--adapter", help="Path to lora_weights.pt (default: cached download)."
+    model: Optional[pathlib.Path] = typer.Option(
+        None, "--model", help="Path to a .gguf model (default: cached download)."
     ),
 ):
     """Generate docstrings for undocumented functions and insert them.
@@ -74,10 +74,10 @@ def fill(
         typer.echo("nothing to do: no undocumented functions found")
         return
 
-    # Imported here, not at module scope, so `scan` never pays for torch.
+    # Imported here, not at module scope, so `scan` never pays for the model.
     from docgen import generator as gen
 
-    engine = gen.load_generator(adapter)
+    engine = gen.load_generator(model)
 
     written = 0
     generated = 0

@@ -1,9 +1,10 @@
 import inspect
 import logging
+import os
 import pathlib
 import re
-
-import torch
+import shutil
+import urllib.request
 
 from docgen.astutils import FuncDef, has_section, raises_exception, sections_match
 from docgen.prompt import build_prompt
@@ -12,6 +13,18 @@ logger = logging.getLogger(__name__)
 
 # Same budget training/evaluate.py generates with.
 MAX_NEW_TOKENS = 200
+
+# llama-cpp-python defaults to 512, which a function near scanner.MAX_CODE_CHARS
+# (2000 chars) plus the prompt plus MAX_NEW_TOKENS can overflow.
+N_CTX = 2048
+
+MODEL_URL = (
+    "https://github.com/brownricee/docstring-generator-cli/releases/download/"
+    "gguf-v1/docgen-q8_0.gguf"
+)
+CACHE_DIR = pathlib.Path(
+    os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")
+) / "docgen"
 
 _FENCE = re.compile(r"^\s*```")
 
@@ -99,41 +112,17 @@ def is_usable(text: str, fn: FuncDef) -> bool:
     return sections_match(text, fn)
 
 
-def _argsort_by_length(lengths: list[int]) -> list[int]:
-    """Return indices that sort lengths ascending.
-
-    order[i] is the original index of the i-th shortest item -- the same
-    convention argsort uses.
-    """
-    return sorted(range(len(lengths)), key=lambda i: lengths[i])
-
-
-def _unsort(sorted_items: list, order: list[int]) -> list:
-    """Undo _argsort_by_length: place each sorted item back at its original index."""
-    items = [None] * len(order)
-    for pos, orig_idx in enumerate(order):
-        items[orig_idx] = sorted_items[pos]
-    return items
-
-
 class Generator:
-    """Wraps a loaded model and tokenizer to produce docstrings in a batch."""
+    """Wraps a loaded llama_cpp.Llama to produce docstrings for a batch."""
 
-    def __init__(self, model, tokenizer):
-        self.model = model
-        self.tokenizer = tokenizer
-        # Left padding is required for batched generation on a decoder-only
-        # model: generation continues from the right edge of each row, so
-        # right-padding would insert padding tokens between prompt and
-        # continuation instead of before the prompt.
-        self.tokenizer.padding_side = "left"
+    def __init__(self, llm):
+        self.llm = llm
 
     def generate_batch(self, codes: list[str]) -> list[str]:
         """Generate raw docstring continuations for a batch of functions.
 
-        One model.generate() call for the whole batch, instead of one per
-        function -- the sequential version left the CPU/GPU underused between
-        calls.
+        llama-cpp-python's completion API runs one sequence at a time, so this
+        loops; the batch interface stays so cli.py's flush logic is unchanged.
 
         Args:
             codes: Each function's source, dedented to column 0.
@@ -143,48 +132,54 @@ class Generator:
             An entry is "" if that generation ran past its token budget
             without stopping.
         """
-        prompts = [build_prompt(code) for code in codes]
-
-        # Tokenize once, unpadded, to get exact per-item lengths, then sort so
-        # the batch pads to a much smaller max length than a random ordering
-        # would. Unsorted back to input order below -- callers never see this.
-        encoded = self.tokenizer(prompts, padding=False)
-        order = _argsort_by_length([len(ids) for ids in encoded["input_ids"]])
-        sorted_encoded = {k: [v[i] for i in order] for k, v in encoded.items()}
-
-        inputs = self.tokenizer.pad(sorted_encoded, return_tensors="pt").to(self.model.device)
-        with torch.inference_mode():
-            out = self.model.generate(
-                **inputs,
-                max_new_tokens=MAX_NEW_TOKENS,
-                do_sample=False,
-                pad_token_id=self.tokenizer.eos_token_id,
+        results = []
+        for code in codes:
+            # temperature=0 is greedy, matching the do_sample=False the model
+            # was evaluated with. repeat_penalty=1.0 is required: llama-cpp's
+            # default of 1.1 is not greedy decoding and changes the output.
+            out = self.llm(
+                build_prompt(code),
+                max_tokens=MAX_NEW_TOKENS,
+                temperature=0.0,
+                repeat_penalty=1.0,
             )
-
-        input_len = inputs["input_ids"].shape[1]
-        eos_id = self.tokenizer.eos_token_id
-
-        results_sorted = []
-        for row in out[:, input_len:]:
-            # pad_token_id == eos_token_id (set in model.py), so a finished
-            # row's trailing padding is also eos -- the first eos in a row is
-            # always its real stop, and skip_special_tokens strips all of it.
-            # A row with no eos anywhere never stopped on its own: it ran the
-            # full budget and is a half-written docstring: refuse it rather
-            # than insert a truncated one.
-            if not bool((row == eos_id).any()):
+            choice = out["choices"][0]
+            # "length" means it never emitted eos: a half-written docstring.
+            # Refuse it rather than insert a truncated one.
+            if choice["finish_reason"] == "length":
                 logger.warning("generation hit the %d-token cap", MAX_NEW_TOKENS)
-                results_sorted.append("")
+                results.append("")
                 continue
-            results_sorted.append(self.tokenizer.decode(row, skip_special_tokens=True))
+            results.append(choice["text"])
+        return results
 
-        return _unsort(results_sorted, order)
+
+def resolve_model(override: pathlib.Path | None = None) -> pathlib.Path:
+    """Return a local path to the GGUF model, downloading it on first use."""
+    if override is not None:
+        return override
+
+    dest = CACHE_DIR / MODEL_URL.rsplit("/", 1)[1]
+    if dest.exists():
+        return dest
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"downloading model (1.6 GB, first run only) -> {dest}")
+
+    # Download to .part and rename. os.replace is atomic, so a Ctrl-C partway
+    # through leaves no half-written file that later runs would trust as cached.
+    tmp = dest.with_suffix(".part")
+    with urllib.request.urlopen(MODEL_URL) as response, open(tmp, "wb") as f:
+        shutil.copyfileobj(response, f)
+    os.replace(tmp, dest)
+
+    return dest
 
 
-def load_generator(adapter: pathlib.Path | None = None) -> Generator:
-    """Load the fine-tuned model, downloading the adapter if it is not cached."""
-    from docgen.model import load_model, resolve_adapter
+def load_generator(model_path: pathlib.Path | None = None) -> Generator:
+    """Load the fine-tuned GGUF model, downloading it if it is not cached."""
+    from llama_cpp import Llama
 
-    adapter_path = resolve_adapter(adapter)
-    print("loading model (first run downloads ~3 GB from HuggingFace)...")
-    return Generator(*load_model(adapter_path))
+    path = resolve_model(model_path)
+    print("loading model...")
+    return Generator(Llama(model_path=str(path), n_ctx=N_CTX, verbose=False))
