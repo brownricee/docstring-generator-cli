@@ -22,6 +22,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n", type=int, default=30, help="number of held-out test.jsonl examples to evaluate"
     )
+    parser.add_argument(
+        "--gguf",
+        action="append",
+        default=[],
+        help="compare this GGUF export against the torch fine-tuned model instead of "
+        "running the base-vs-fine-tuned comparison (repeatable)",
+    )
     return parser.parse_args()
 
 
@@ -59,9 +66,43 @@ def pass_rate(samples: list[dict], generations: list[str]) -> tuple[int, int]:
     return passed, len(samples)
 
 
+def compare_gguf(samples: list[dict], paths: list[str]):
+    """Score each GGUF export against the torch fine-tuned model it came from.
+
+    Pass-rate alone cannot see a quantized model rewording a docstring, so this
+    also counts outputs identical to the reference after postprocess.
+    """
+    from llama_cpp import Llama
+
+    from docgen.generator import Generator, postprocess
+
+    print(f"generating with torch fine-tuned model ({len(samples)} samples)...")
+    ft_model, tokenizer = load_finetuned_model()
+    reference = generate_all(ft_model, tokenizer, samples)
+    del ft_model
+    ref_clean = [postprocess(r) for r in reference]
+
+    rows = [("torch fine-tuned (reference)", pass_rate(samples, reference)[0], len(samples))]
+    for path in paths:
+        print(f"generating with {path}...")
+        engine = Generator(Llama(model_path=path, n_ctx=2048, verbose=False))
+        outputs = engine.generate_batch([rec["code"] for rec in samples])
+        identical = sum(postprocess(o) == r for o, r in zip(outputs, ref_clean))
+        rows.append((path, pass_rate(samples, outputs)[0], identical))
+
+    n = len(samples)
+    print(f"\n{'model':<40} {'pass-rate':>12} {'identical to ref':>18}")
+    for name, passed, identical in rows:
+        print(f"{name:<40} {passed:>5}/{n:<6} {identical:>11}/{n}")
+
+
 def main():
     args = parse_args()
     samples = sample_test_set(args.n)
+
+    if args.gguf:
+        compare_gguf(samples, args.gguf)
+        return
 
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Coder-1.5B")
     tokenizer.pad_token = tokenizer.eos_token
