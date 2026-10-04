@@ -1,9 +1,11 @@
+import hashlib
 import inspect
 import logging
 import os
 import pathlib
 import re
-import shutil
+import sys
+import urllib.error
 import urllib.request
 
 from docgen.astutils import FuncDef, has_section, raises_exception, sections_match
@@ -22,9 +24,21 @@ MODEL_URL = (
     "https://github.com/brownricee/docstring-generator-cli/releases/download/"
     "gguf-v1/docgen-q8_0.gguf"
 )
-CACHE_DIR = pathlib.Path(
-    os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")
-) / "docgen"
+# Pinned so a truncated or tampered download is never cached and trusted.
+MODEL_SHA256 = "5581fdfc6ce94a74397b5cb8123cc79d6798139d2d1c33147c5b504e1a7278c7"
+
+
+def _cache_dir() -> pathlib.Path:
+    if "XDG_CACHE_HOME" in os.environ:
+        base = pathlib.Path(os.environ["XDG_CACHE_HOME"])
+    elif sys.platform == "win32" and "LOCALAPPDATA" in os.environ:
+        base = pathlib.Path(os.environ["LOCALAPPDATA"])
+    else:
+        base = pathlib.Path.home() / ".cache"
+    return base / "docgen"
+
+
+CACHE_DIR = _cache_dir()
 
 _FENCE = re.compile(r"^\s*```")
 
@@ -154,6 +168,22 @@ class Generator:
         return results
 
 
+def _download(url: str, tmp: pathlib.Path) -> str:
+    """Stream url to tmp, printing progress. Returns the SHA-256 hex digest."""
+    digest = hashlib.sha256()
+    with urllib.request.urlopen(url) as response, open(tmp, "wb") as f:
+        total = int(response.headers.get("Content-Length") or 0)
+        done = 0
+        while chunk := response.read(1 << 20):
+            f.write(chunk)
+            digest.update(chunk)
+            done += len(chunk)
+            if total:
+                print(f"\r  {done / 1e6:,.0f} / {total / 1e6:,.0f} MB", end="", flush=True)
+    print()
+    return digest.hexdigest()
+
+
 def resolve_model(override: pathlib.Path | None = None) -> pathlib.Path:
     """Return a local path to the GGUF model, downloading it on first use."""
     if override is not None:
@@ -169,8 +199,21 @@ def resolve_model(override: pathlib.Path | None = None) -> pathlib.Path:
     # Download to .part and rename. os.replace is atomic, so a Ctrl-C partway
     # through leaves no half-written file that later runs would trust as cached.
     tmp = dest.with_suffix(".part")
-    with urllib.request.urlopen(MODEL_URL) as response, open(tmp, "wb") as f:
-        shutil.copyfileobj(response, f)
+    try:
+        digest = _download(MODEL_URL, tmp)
+    except (urllib.error.URLError, OSError) as exc:
+        tmp.unlink(missing_ok=True)
+        raise SystemExit(
+            f"error: could not download the model ({exc}).\n"
+            f"Download it manually from {MODEL_URL}\n"
+            f"and pass it with --model PATH."
+        )
+    if digest != MODEL_SHA256:
+        tmp.unlink(missing_ok=True)
+        raise SystemExit(
+            "error: downloaded model failed its checksum (corrupt or incomplete); "
+            "please retry."
+        )
     os.replace(tmp, dest)
 
     return dest
@@ -178,7 +221,14 @@ def resolve_model(override: pathlib.Path | None = None) -> pathlib.Path:
 
 def load_generator(model_path: pathlib.Path | None = None) -> Generator:
     """Load the fine-tuned GGUF model, downloading it if it is not cached."""
-    from llama_cpp import Llama
+    try:
+        from llama_cpp import Llama
+    except ImportError:
+        raise SystemExit(
+            "error: llama-cpp-python is not installed. Install it with a prebuilt wheel:\n"
+            "  pip install llama-cpp-python "
+            "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu"
+        )
 
     path = resolve_model(model_path)
     print("loading model...")

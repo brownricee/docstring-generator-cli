@@ -140,3 +140,67 @@ def test_generation_that_hits_the_token_cap_is_refused():
     results = Generator(FakeLlama(finish_reason="length")).generate_batch(["def a():\n    pass"])
     assert results == [""]
 
+
+
+class FakeResponse:
+    def __init__(self, data: bytes):
+        self.data = data
+        self.headers = {"Content-Length": str(len(data))}
+
+    def read(self, n=-1):
+        chunk, self.data = self.data[:n], self.data[n:]
+        return chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.fixture
+def download(monkeypatch, tmp_path):
+    from docgen import generator
+
+    monkeypatch.setattr(generator, "CACHE_DIR", tmp_path / "cache")
+
+    def serve(data: bytes):
+        monkeypatch.setattr(generator.urllib.request, "urlopen", lambda url: FakeResponse(data))
+
+    return generator, serve
+
+
+def test_download_with_matching_checksum_is_cached(download, monkeypatch):
+    import hashlib
+
+    generator, serve = download
+    data = b"fake gguf"
+    monkeypatch.setattr(generator, "MODEL_SHA256", hashlib.sha256(data).hexdigest())
+    serve(data)
+
+    path = generator.resolve_model()
+    assert path.read_bytes() == data
+    assert not path.with_suffix(".part").exists()
+
+
+def test_download_with_bad_checksum_is_discarded(download):
+    generator, serve = download
+    serve(b"truncated")
+
+    with pytest.raises(SystemExit):
+        generator.resolve_model()
+    assert not list((generator.CACHE_DIR).glob("*.gguf"))
+    assert not list((generator.CACHE_DIR).glob("*.part"))
+
+
+def test_download_network_error_is_reported(download, monkeypatch):
+    import urllib.error
+
+    generator, _ = download
+
+    def boom(url):
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(generator.urllib.request, "urlopen", boom)
+    with pytest.raises(SystemExit, match="--model"):
+        generator.resolve_model()
