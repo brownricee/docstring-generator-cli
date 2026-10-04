@@ -54,11 +54,18 @@ never the reverse, so the published package carries no training code.
 ## Using the CLI
 
 ```bash
-pip install -e . --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+pip install docstring-generator-cli --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 ```
 
 The extra index serves prebuilt `llama-cpp-python` wheels. PyPI only has its
-source distribution, which needs CMake and a C++ compiler to install.
+source distribution, which needs CMake and a C++ compiler to install. Python
+3.10+ is required; `pipx install` with the same `--pip-args` works too. For a
+development checkout use `pip install -e .` with the same extra index.
+
+Limitations: Python only, Google-style docstrings only, functions up to 2000
+characters, and CPU inference (about a second or more per function). The first
+`fill` downloads a 1.65 GB model to the cache directory. Directories such as
+`.venv`, `node_modules`, `build` and `.git` are skipped when scanning a folder.
 
 `scan` reports the gaps and loads no model, so it returns instantly:
 
