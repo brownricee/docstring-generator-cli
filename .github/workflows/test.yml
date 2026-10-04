@@ -1,0 +1,19 @@
+name: tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # Tests stub the model, so llama-cpp-python is never imported. torch is
+      # needed by tests/test_lora.py and tests/test_model.py.
+      - run: pip install typer libcst pytest torch transformers --extra-index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -e . --no-deps
+      - run: python -m pytest -q
