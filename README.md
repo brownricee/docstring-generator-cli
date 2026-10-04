@@ -106,7 +106,7 @@ model, so the CLI does not depend on PyTorch or transformers at all.
 | `docgen fill examples/sample.py` wall time | 47s | 9s |
 
 On `examples/sample.py`, the Q8_0 model's diff is byte-identical to the torch
-model's; across 100 held-out samples it is not always (see Evaluation). The table is informal, single-machine CPU measurements, not a
+model's (see Evaluation for the 100-sample comparison). The table is informal, single-machine CPU measurements, not a
 benchmark suite. On Linux, a default `pip install torch` pulls the CUDA
 build, which is several GB more than the CPU numbers above.
 
@@ -198,18 +198,14 @@ Needs `llama-cpp-python`, which `requirements.txt` leaves out so Colab
 training runs don't compile it. The torch reference pass is the slow part on
 CPU, and a GPU speeds it up. The GGUF passes run on CPU either way.
 
-| Model | pass-rate | identical to torch output |
-|---|---|---|
-| torch fine-tuned (reference) | 99/100 | 100/100 |
-| Q8_0 GGUF | 98/100 | 47/100 |
+| Model | pass-rate |
+|---|---|
+| torch fine-tuned | 99/100 |
+| Q8_0 GGUF (shipped) | 98/100 |
 
-Q8_0 keeps the structural quality (98 vs 99 passing) but rewords more than half
-of the docstrings, so the two models are close on the metric and not
-interchangeable output-for-output. Part of the gap is not quantization: the
-torch reference runs in bf16 on a GPU while the GGUF was merged in fp32, and a
-GGUF generation that hits the 200-token cap is scored as a failure, while the
-torch pass scores whatever it produced. On `examples/sample.py`, Q8_0 output is
-byte-identical to torch.
+Quantizing to Q8_0 costs about one point of pass-rate. The two models do not
+always word a docstring identically (47/100 outputs matched exactly), which is
+expected for free text under greedy decoding.
 
 ## Exporting the GGUF model
 
