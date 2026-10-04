@@ -100,6 +100,17 @@ def test_iter_py_files_accepts_a_file_or_a_directory(tmp_path):
     assert set(iter_py_files(tmp_path)) == {a, b}
 
 
+def test_iter_py_files_skips_vendored_and_build_dirs(tmp_path):
+    keep = write(tmp_path, "def f():\n    pass\n", "a.py")
+    for name in (".venv", "node_modules", "build", "pkg.egg-info", ".git"):
+        (tmp_path / name).mkdir()
+        write(tmp_path / name, "def g():\n    pass\n", "x.py")
+    (tmp_path / "lib" / "site-packages").mkdir(parents=True)
+    write(tmp_path / "lib" / "site-packages", "def h():\n    pass\n", "y.py")
+
+    assert iter_py_files(tmp_path) == [keep]
+
+
 def test_read_write_source_preserve_crlf(tmp_path):
     path = write(tmp_path, "def f(a):\r\n    return a\r\n")
     source = read_source(path)

@@ -1,5 +1,6 @@
 import ast
 import logging
+import os
 import textwrap
 from pathlib import Path
 
@@ -17,9 +18,27 @@ class Unsupported(Exception):
     """A function the tool cannot handle. The message is the reason to report."""
 
 
+SKIP_DIRS = frozenset({
+    ".git", ".hg", ".svn", ".venv", "venv", "env", ".env", "__pycache__",
+    "node_modules", "site-packages", "build", "dist", ".tox", ".nox",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache",
+})
+
+
 def iter_py_files(path: Path) -> list[Path]:
-    """Return the .py files under path, or path itself if it is a file."""
-    return [path] if path.is_file() else sorted(path.rglob("*.py"))
+    """Return the .py files under path, or path itself if it is a file.
+
+    Directories in SKIP_DIRS (virtualenvs, VCS metadata, build output, ...) are
+    not descended into: `fill --write` must never rewrite vendored or generated
+    code. A path given explicitly is always honored.
+    """
+    if path.is_file():
+        return [path]
+    found = []
+    for root, dirs, files in os.walk(path):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.endswith(".egg-info")]
+        found.extend(Path(root) / f for f in files if f.endswith(".py"))
+    return sorted(found)
 
 
 def read_source(path: Path) -> str:
