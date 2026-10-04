@@ -1,5 +1,6 @@
 import ast
 import difflib
+import importlib.metadata
 import itertools
 import pathlib
 from typing import Optional
@@ -19,6 +20,23 @@ app = typer.Typer(
     help="Find Python functions missing docstrings and fill them in.",
     add_completion=False,
 )
+
+
+def _version_callback(value: bool):
+    if value:
+        typer.echo(importlib.metadata.version("docstring-generator-cli"))
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False, "--version", callback=_version_callback, is_eager=True,
+        help="Show the version and exit.",
+    ),
+):
+    pass
+
 
 PathArg = typer.Argument(..., exists=True, help="File or directory to process.")
 

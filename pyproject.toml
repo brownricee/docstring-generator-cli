@@ -7,7 +7,20 @@ name = "docstring-generator-cli"
 version = "0.1.0"
 description = "Find Python functions missing docstrings and fill them with a fine-tuned LoRA model."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ryaan Khawaja" }]
+keywords = ["docstring", "documentation", "llm", "lora", "gguf", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Documentation",
+]
 # ast.FunctionDef | ast.AsyncFunctionDef in docgen/astutils.py is a runtime
 # PEP-604 union evaluated at import, so 3.9 raises TypeError on import.
 requires-python = ">=3.10"
@@ -21,6 +34,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+
+[project.urls]
+Homepage = "https://github.com/brownricee/docstring-generator-cli"
+Issues = "https://github.com/brownricee/docstring-generator-cli/issues"
 
 [project.scripts]
 docgen = "docgen.cli:app"
